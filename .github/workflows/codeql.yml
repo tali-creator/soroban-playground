@@ -2,12 +2,12 @@ name: "CodeQL Security Analysis"
 
 on:
   push:
-    branches: [feat/code-quality-workflow]
+    branches: [main]
   pull_request:
-    branches: [feat/code-quality-workflow]
+    branches: [main]
   schedule:
     # Run weekly on Mondays at 06:00 UTC
-    - cron: "35 18 * * 4"
+    - cron: "0 6 * * 1"
 
 permissions:
   security-events: write
