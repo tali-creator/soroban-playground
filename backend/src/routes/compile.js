@@ -5,6 +5,55 @@ import path from "path";
 
 const router = express.Router();
 
+// Helper function to parse cargo build errors and determine appropriate response
+function parseCargoError(stdout, stderr, err) {
+  const fullOutput = (stdout || '') + '\n' + (stderr || '');
+
+  // Check for timeout
+  if (err && err.code === 'ETIMEDOUT') {
+    return {
+      statusCode: 500,
+      userMessage: 'Compilation timed out. Please check your code for infinite loops or complex operations.',
+      detailedMessage: fullOutput
+    };
+  }
+
+  // Check for missing build tools
+  if (stderr && (stderr.includes('cargo: command not found') || stderr.includes('rustc: command not found') || stderr.includes('linker') && stderr.includes('not found'))) {
+    return {
+      statusCode: 500,
+      userMessage: 'Build system not available. Please contact support.',
+      detailedMessage: fullOutput
+    };
+  }
+
+  // Check for Rust compilation errors (user's code issues)
+  if (stderr && (stderr.includes('error[') || stderr.match(/^\s*error:/m))) {
+    // Extract the first error message for user-friendly feedback
+    const lines = stderr.split('\n');
+    let firstError = 'Unknown compilation error';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.includes('error[') || trimmed.startsWith('error:')) {
+        firstError = trimmed;
+        break;
+      }
+    }
+    return {
+      statusCode: 400,
+      userMessage: `Compilation failed: ${firstError}`,
+      detailedMessage: fullOutput
+    };
+  }
+
+  // Default to server error for unexpected cases
+  return {
+    statusCode: 500,
+    userMessage: 'An unexpected error occurred during compilation.',
+    detailedMessage: fullOutput
+  };
+}
+
 router.post("/", async (req, res) => {
   const { code } = req.body;
   if (!code) {
@@ -49,7 +98,7 @@ lto = true
 
     // Execute Soroban CLI (or cargo block)
     // Note: In a real server you might queue these or containerize. Here we spawn.
-    const command = \`cargo build --target wasm32-unknown-unknown --release\`;
+    const command = 'cargo build --target wasm32-unknown-unknown --release';
 
     exec(command, { cwd: tempDir, timeout: 30000 }, async (err, stdout, stderr) => {
       // Setup cleanup task
@@ -63,10 +112,12 @@ lto = true
 
       if (err) {
         await cleanUp();
-        return res.status(500).json({ 
-          error: "Compilation failed", 
+        const errorInfo = parseCargoError(stdout, stderr, err);
+        console.error('Compilation error details:', errorInfo.detailedMessage); // Log detailed errors for debugging
+        return res.status(errorInfo.statusCode).json({ 
+          error: errorInfo.userMessage, 
           status: "error",
-          details: stderr || err.message,
+          details: errorInfo.detailedMessage,
           logs: stderr ? stderr.split('\n').filter(l => l.trim()) : []
         });
       }
@@ -90,10 +141,17 @@ lto = true
         });
       } catch (e) {
         await cleanUp();
-        return res.status(500).json({ 
-          error: "WASM file not generated", 
+        // Compilation appeared to succeed but no WASM was generated - likely a user code issue
+        const errorInfo = {
+          statusCode: 400,
+          userMessage: 'Compilation succeeded but no WASM artifact was generated. Please check your contract code for issues.',
+          detailedMessage: (stdout || '') + '\n' + (stderr || '')
+        };
+        console.error('WASM generation error details:', errorInfo.detailedMessage);
+        return res.status(errorInfo.statusCode).json({ 
+          error: errorInfo.userMessage, 
           status: "error",
-          details: stderr || e.message,
+          details: errorInfo.detailedMessage,
           logs: stderr ? stderr.split('\n').filter(l => l.trim()) : []
         });
       }
