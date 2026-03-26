@@ -2,6 +2,7 @@ import express from "express";
 import { exec } from "child_process";
 import fs from "fs/promises";
 import path from "path";
+import logger from "../utils/logger.js";
 
 const router = express.Router();
 
@@ -49,7 +50,7 @@ lto = true
 
     // Execute Soroban CLI (or cargo block)
     // Note: In a real server you might queue these or containerize. Here we spawn.
-    const command = \`cargo build --target wasm32-unknown-unknown --release\`;
+    const command = `cargo build --target wasm32-unknown-unknown --release`;
 
     exec(command, { cwd: tempDir, timeout: 30000 }, async (err, stdout, stderr) => {
       // Setup cleanup task
@@ -57,7 +58,11 @@ lto = true
         try {
           await fs.rm(tempDir, { recursive: true, force: true });
         } catch (e) {
-          console.error("Failed to clean up:", e);
+          logger.error("Failed to clean up compilation directory", {
+            route: "compile",
+            tempDir,
+            error: e instanceof Error ? e.message : String(e),
+          });
         }
       };
 
@@ -101,6 +106,10 @@ lto = true
 
   } catch (err) {
     try { await fs.rm(tempDir, { recursive: true, force: true }); } catch (cleanupErr) {}
+    logger.error("Compilation route failed", {
+      route: "compile",
+      error: err instanceof Error ? err.message : String(err),
+    });
     res.status(500).json({ error: "Internal server error", details: err.message });
   }
 });

@@ -12,6 +12,9 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "dependencies": {
+    "winston": "^3.18.3"
+  },
   "devDependencies": {
     "nodemon": "^3.1.14"
   }

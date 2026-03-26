@@ -1,5 +1,6 @@
 import express from "express";
 import { exec } from "child_process";
+import logger from "../utils/logger.js";
 
 const router = express.Router();
 
@@ -13,7 +14,11 @@ router.post("/", async (req, res) => {
   // Real implementation:
   // `soroban contract invoke --id {contractId} --source alice --network testnet -- {functionName} --name {args.name}`
   
-  console.log(\`Invoking \${contractId} -> \${functionName} with args:\`, args);
+  logger.info("Invoking contract function", {
+    route: "invoke",
+    contractId,
+    functionName,
+  });
 
   setTimeout(() => {
     // Simulated invocation response for the MVP

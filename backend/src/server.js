@@ -3,6 +3,7 @@ import cors from "cors";
 import compileRoute from "./routes/compile.js";
 import deployRoute from "./routes/deploy.js";
 import invokeRoute from "./routes/invoke.js";
+import logger from "./utils/logger.js";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -25,5 +26,8 @@ app.get("/api/health", (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Backend server running on http://localhost:${PORT}`);
+  logger.info("Backend server started", {
+    port: PORT,
+    url: `http://localhost:${PORT}`,
+  });
 });
