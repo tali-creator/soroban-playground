@@ -13,7 +13,7 @@ router.post("/", async (req, res) => {
   // Real implementation:
   // `soroban contract invoke --id {contractId} --source alice --network testnet -- {functionName} --name {args.name}`
   
-  console.log(\`Invoking \${contractId} -> \${functionName} with args:\`, args);
+  console.log(`Invoking ${contractId} -> ${functionName} with args:`, args);
 
   setTimeout(() => {
     // Simulated invocation response for the MVP

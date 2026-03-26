@@ -49,7 +49,7 @@ lto = true
 
     // Execute Soroban CLI (or cargo block)
     // Note: In a real server you might queue these or containerize. Here we spawn.
-    const command = \`cargo build --target wasm32-unknown-unknown --release\`;
+    const command = `cargo build --target wasm32-unknown-unknown --release`;
 
     exec(command, { cwd: tempDir, timeout: 30000 }, async (err, stdout, stderr) => {
       // Setup cleanup task
