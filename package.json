@@ -10,7 +10,7 @@
     "backend"
   ],
   "scripts": {
-    "prepare": "husky install",
+    "prepare": "node -e \"if (!process.env.CI) require('child_process').execSync('npx husky install', { stdio: 'inherit' })\"",
     "dev": "npm run dev --workspaces",
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
