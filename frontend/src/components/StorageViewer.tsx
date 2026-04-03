@@ -29,8 +29,8 @@ export default function StorageViewer({ storage }: StorageViewerProps) {
             <tbody className="divide-y divide-gray-800/50">
               {entries.map(([key, val]) => (
                 <tr key={key}>
-                  <td className="py-2 text-purple-400 pr-4">{key}</td>
-                  <td className="py-2 text-green-400 break-all">{val}</td>
+                  <td className="py-2 pr-4 align-top text-cyan-300">{key}</td>
+                  <td className="py-2 break-all text-emerald-300">{val}</td>
                 </tr>
               ))}
             </tbody>

@@ -1,5 +1,5 @@
 import React from "react";
-import { Play, Rocket, Hammer } from "lucide-react";
+import { Play, Rocket, Hammer, CheckCircle2, AlertCircle } from "lucide-react";
 
 interface DeployPanelProps {
   onCompile: () => void;
@@ -7,6 +7,8 @@ interface DeployPanelProps {
   isCompiling: boolean;
   isDeploying: boolean;
   hasCompiled: boolean;
+  compileSummary?: string;
+  compileError?: string | null;
   contractId?: string;
 }
 
@@ -16,6 +18,8 @@ export default function DeployPanel({
   isCompiling,
   isDeploying,
   hasCompiled,
+  compileSummary,
+  compileError,
   contractId,
 }: DeployPanelProps) {
   return (
@@ -69,6 +73,20 @@ export default function DeployPanel({
           <div className="font-mono text-sm text-green-400 break-all bg-gray-900 border border-green-900/50 p-2 rounded">
             {contractId}
           </div>
+        </div>
+      )}
+
+      {compileSummary && !compileError && (
+        <div className="flex items-start gap-3 rounded-lg border border-emerald-900/60 bg-emerald-950/40 p-3 text-sm text-emerald-200">
+          <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
+          <p>{compileSummary}</p>
+        </div>
+      )}
+
+      {compileError && (
+        <div className="flex items-start gap-3 rounded-lg border border-rose-900/60 bg-rose-950/40 p-3 text-sm text-rose-200">
+          <AlertCircle size={16} className="mt-0.5 shrink-0" />
+          <p>{compileError}</p>
         </div>
       )}
     </div>

@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Soroban Playground",
-  description: "Stellar Developer Playground for building Soroban Smart Contracts",
+  description: "Build, compile, deploy, and test Soroban smart contracts from one browser workspace.",
 };
 
 export default function RootLayout({
@@ -13,7 +13,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className="bg-gray-950 text-gray-100 antialiased min-h-screen">
+      <body className="min-h-screen bg-gray-950 text-gray-100 antialiased">
         {children}
       </body>
     </html>

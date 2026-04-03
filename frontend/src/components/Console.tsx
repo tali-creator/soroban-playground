@@ -18,7 +18,7 @@ export default function Console({ logs }: ConsoleProps) {
         ) : (
           logs.map((log, i) => (
             <div key={i} className="text-gray-300 break-words whitespace-pre-wrap">
-              <span className="text-gray-600 mr-2">❯</span>
+              <span className="text-cyan-500 mr-2">{String(i + 1).padStart(2, "0")}</span>
               {log}
             </div>
           ))
