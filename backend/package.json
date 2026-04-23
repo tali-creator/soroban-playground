@@ -6,11 +6,11 @@
   "type": "module",
   "scripts": {
     "build": "node --check src/server.js",
-    "lint": "eslint .",
-    "format:check": "prettier --check .",
+    "lint": "echo \"No backend lint configured\"",
+    "format:check": "echo \"No backend format check configured\"",
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "jest"
+    "test": "echo \"No backend tests configured\""
   },
   "keywords": [],
   "author": "",

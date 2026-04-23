@@ -17,6 +17,7 @@ import Console from "@/components/Console";
 import DeployPanel from "@/components/DeployPanel";
 import CallPanel from "@/components/CallPanel";
 import StorageViewer from "@/components/StorageViewer";
+import TransactionCallGraph from "@/components/TransactionCallGraph";
 import PredictionMarketPanel, { MarketData } from "@/components/PredictionMarketPanel";
 import WalletConnect from "@/components/WalletConnect";
 import TransactionStatus from "@/components/TransactionStatus";
@@ -24,6 +25,11 @@ import VestingDashboard, { VestingScheduleData } from "@/components/VestingDashb
 import IdentityPortal, { IdentityData } from "@/components/IdentityPortal";
 import { useFreighterWallet } from "@/hooks/useFreighterWallet";
 import { useTransactionTracker } from "@/hooks/useTransactionTracker";
+import {
+  parseTransactionInvocationPayload,
+  type TransactionCallGraph as TransactionCallGraphState,
+  type LedgerState,
+} from "@/utils/transactionGraph";
 
 const DEFAULT_CODE = `#![no_std]
 use soroban_sdk::{contract, contractimpl, symbol_short, Env, Symbol};
@@ -116,6 +122,97 @@ function toStorageRecord(value: unknown) {
   );
 }
 
+function shortId(contractId: string): string {
+  return contractId.length > 14
+    ? `${contractId.slice(0, 8)}...${contractId.slice(-4)}`
+    : contractId;
+}
+
+function createMockInvocationPayload(
+  contractId: string,
+  funcName: string,
+  args: Record<string, string>,
+  baseStorage: LedgerState,
+): unknown {
+  const timestamp = Date.now();
+  const serializedArgs = JSON.stringify(args);
+  const userName = args.name ?? "anonymous";
+  const rootStorage = {
+    ...baseStorage,
+    last_function: funcName,
+    last_args: serializedArgs,
+    last_invoked_at: new Date(timestamp).toISOString(),
+  };
+
+  const routerContract = `ROUTER_${shortId(contractId)}`;
+  const tokenContract = `TOKEN_${shortId(contractId)}`;
+  const auditContract = `AUDIT_${shortId(contractId)}`;
+
+  return {
+    txHash: `0x${Math.random().toString(16).slice(2).padEnd(64, "0")}`,
+    invocationTree: {
+      id: `root-${timestamp}`,
+      contractId,
+      function: funcName,
+      args,
+      result: funcName === "hello" ? userName : "ok",
+      ledgerState: rootStorage,
+      children: [
+        {
+          id: `router-${timestamp}`,
+          contract: routerContract,
+          fn: "route_call",
+          args: {
+            target: tokenContract,
+            original_method: funcName,
+          },
+          result: "forwarded",
+          ledgerState: {
+            route_count: String(Number(baseStorage.route_count ?? "0") + 1),
+            last_route_target: tokenContract,
+          },
+          children: [
+            {
+              id: `token-${timestamp}`,
+              contractId: tokenContract,
+              method: "write_checkpoint",
+              arguments: {
+                checkpoint_key: `tx:${timestamp}`,
+                greeting: userName,
+              },
+              output: "checkpoint_written",
+              storage: {
+                last_greeting: userName,
+                checkpoint_count: String(
+                  Number(baseStorage.checkpoint_count ?? "0") + 1,
+                ),
+              },
+              children: [],
+            },
+          ],
+        },
+        {
+          id: `audit-${timestamp}`,
+          contract_id: auditContract,
+          entrypoint: "audit_event",
+          params: {
+            caller_contract: contractId,
+            invoked_function: funcName,
+          },
+          returnValue: "audit_ok",
+          state: {
+            audit_trail_size: String(
+              Number(baseStorage.audit_trail_size ?? "0") + 1,
+            ),
+            last_audited_fn: funcName,
+          },
+          subInvocations: [],
+        },
+      ],
+    },
+  };
+}
+
 export default function Home() {
   const [code, setCode] = useState(DEFAULT_CODE);
   const [logs, setLogs] = useState<string[]>([
@@ -184,7 +281,16 @@ export default function Home() {
     artifacts: 0,
   });
   const [contractId, setContractId] = useState<string>();
-  const [storage, setStorage] = useState<Record<string, string>>({});
+  const [storage, setStorage] = useState<LedgerState>({});
+  const [storageContextLabel, setStorageContextLabel] = useState<string>(
+    "Latest contract snapshot",
+  );
+  const [transactionGraph, setTransactionGraph] =
+    useState<TransactionCallGraphState>({
+      nodes: [],
+      edges: [],
+    });
+  const [selectedGraphNodeId, setSelectedGraphNodeId] = useState<string>();
   const [lastArtifactName, setLastArtifactName] =
     useState<string>("contract.wasm");
   const [lastDeployMessage, setLastDeployMessage] = useState<string>();
@@ -352,6 +458,9 @@ export default function Home() {
     setContractId(undefined);
     setLastDeployMessage(undefined);
     setStorage({});
+    setStorageContextLabel("Latest contract snapshot");
+    setTransactionGraph({ nodes: [], edges: [] });
+    setSelectedGraphNodeId(undefined);
     appendLog("[compile] Sending source to backend...");
 
     try {
@@ -417,6 +526,9 @@ export default function Home() {
         wasmPath: payload.wasmPath,
         deployedAt: payload.deployedAt,
       });
+      setStorageContextLabel("Latest contract snapshot");
+      setTransactionGraph({ nodes: [], edges: [] });
+      setSelectedGraphNodeId(undefined);
 
       appendLog(`[deploy] ${payload.message}`);
       appendLog(`[deploy] Contract ID: ${payload.contractId}`);
@@ -520,18 +632,60 @@ export default function Home() {
 
       appendLog(`[invoke] ${payload.message}`);
       appendLog(`[invoke] Output: ${JSON.stringify(payload.output)}`);
-      setStorage((prev) => ({
-        ...prev,
-        lastFunction: payload.functionName,
-        lastOutput: JSON.stringify(payload.output),
-        invokedAt: payload.invokedAt,
-        ...toStorageRecord(payload.args),
-      }));
+      const invocationPayload = createMockInvocationPayload(
+        contractId,
+        funcName,
+        args,
+        storage,
+      );
+      const parsedGraph = parseTransactionInvocationPayload(invocationPayload);
+      setTransactionGraph(parsedGraph);
+
+      if (parsedGraph.nodes.length > 0) {
+        const terminalNode = parsedGraph.nodes[parsedGraph.nodes.length - 1];
+        const uniqueContracts = new Set(
+          parsedGraph.nodes.map((node) => node.contractId),
+        ).size;
+        setSelectedGraphNodeId(terminalNode.id);
+        setStorage(terminalNode.ledgerState);
+        setStorageContextLabel(
+          `Snapshot at ${terminalNode.contractId}.${terminalNode.functionName}`,
+        );
+        appendLog(
+          `[invoke] Captured invocation tree: ${parsedGraph.nodes.length} calls across ${uniqueContracts} contracts.`,
+        );
+      } else {
+        setStorage((prev) => ({
+          ...prev,
+          lastFunction: payload.functionName,
+          lastOutput: JSON.stringify(payload.output),
+          invokedAt: payload.invokedAt,
+          ...toStorageRecord(payload.args),
+        }));
+        setStorageContextLabel("Latest contract snapshot");
+      }
     } catch (error) {
       appendLog(`[error] Invoke failed: ${formatApiError(error)}`);
     } finally {
       setIsInvoking(false);
     }
+  };
+
+  const handleGraphNodeSelect = (nodeId: string) => {
+    setSelectedGraphNodeId(nodeId);
+    const selectedNode = transactionGraph.nodes.find((node) => node.id === nodeId);
+
+    if (!selectedNode) {
+      return;
+    }
+
+    setStorage(selectedNode.ledgerState);
+    setStorageContextLabel(
+      `Snapshot at ${selectedNode.contractId}.${selectedNode.functionName}`,
+    );
+    appendLog(
+      `[graph] Inspecting ${selectedNode.contractId}.${selectedNode.functionName}`,
+    );
   };
 
   // ── Prediction Market handlers ─────────────────────────────────────────────
@@ -1327,7 +1481,15 @@ export default function Home() {
                 ))}
               </div>
             </div>
-            <StorageViewer storage={storage} />
+            <TransactionCallGraph
+              graph={transactionGraph}
+              selectedNodeId={selectedGraphNodeId}
+              onNodeSelect={handleGraphNodeSelect}
+            />
+            <StorageViewer
+              storage={storage}
+              contextLabel={storageContextLabel}
+            />
             <WalletConnect wallet={wallet} />
             <PredictionMarketPanel
               contractId={contractId}

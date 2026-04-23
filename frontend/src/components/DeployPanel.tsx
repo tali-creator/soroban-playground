@@ -28,7 +28,7 @@ export default function DeployPanel({
         <Rocket size={16} className="mr-2 text-primary-400" />
         Build & Deploy
       </h3>
-      
+
       <div className="grid grid-cols-2 gap-3">
         <button
           onClick={onCompile}
@@ -54,8 +54,8 @@ export default function DeployPanel({
             !hasCompiled
               ? "bg-gray-800 text-gray-600 cursor-not-allowed opacity-50"
               : isDeploying
-              ? "bg-gray-800 text-gray-500 cursor-not-allowed"
-              : "bg-green-600 hover:bg-green-500 text-white shadow-[0_0_15px_rgba(22,163,74,0.3)] hover:shadow-[0_0_20px_rgba(22,163,74,0.5)]"
+                ? "bg-gray-800 text-gray-500 cursor-not-allowed"
+                : "bg-green-600 hover:bg-green-500 text-white shadow-[0_0_15px_rgba(22,163,74,0.3)] hover:shadow-[0_0_20px_rgba(22,163,74,0.5)]"
           }`}
         >
           {isDeploying ? (
