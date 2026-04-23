@@ -20,6 +20,7 @@ import StorageViewer from "@/components/StorageViewer";
 import PredictionMarketPanel, { MarketData } from "@/components/PredictionMarketPanel";
 import WalletConnect from "@/components/WalletConnect";
 import TransactionStatus from "@/components/TransactionStatus";
+import VestingDashboard, { VestingScheduleData } from "@/components/VestingDashboard";
 import { useFreighterWallet } from "@/hooks/useFreighterWallet";
 import { useTransactionTracker } from "@/hooks/useTransactionTracker";
 
@@ -190,6 +191,10 @@ export default function Home() {
   // Prediction market state
   const [markets, setMarkets] = useState<MarketData[]>([]);
   const [isPredictionLoading, setIsPredictionLoading] = useState(false);
+
+  // Vesting state
+  const [vestingSchedules, setVestingSchedules] = useState<VestingScheduleData[]>([]);
+  const [isVestingLoading, setIsVestingLoading] = useState(false);
 
   // Wallet + transaction tracking
   const wallet = useFreighterWallet();
@@ -671,6 +676,188 @@ export default function Home() {
     }
   };
 
+  // ── Vesting handlers ───────────────────────────────────────────────────────
+
+  const handleCreateLinear = async (params: {
+    beneficiary: string; token: string; amount: number;
+    cliff: number; start: number; end: number;
+  }) => {
+    if (!contractId) return;
+    const txId = addTx(`Create linear vesting for ${params.beneficiary.slice(0, 8)}…`);
+    setIsVestingLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "create_linear_schedule",
+        args: {
+          beneficiary: params.beneficiary,
+          token: params.token,
+          total_amount: String(params.amount),
+          cliff_timestamp: String(params.cliff),
+          start_timestamp: String(params.start),
+          end_timestamp: String(params.end),
+        },
+      });
+      const id = vestingSchedules.length + 1;
+      setVestingSchedules((prev) => [
+        ...prev,
+        {
+          id,
+          beneficiary: params.beneficiary,
+          token: params.token,
+          totalAmount: params.amount,
+          releasedAmount: 0,
+          cliffTimestamp: params.cliff,
+          startTimestamp: params.start,
+          endTimestamp: params.end,
+          vestingType: "Linear",
+          milestones: [],
+          revoked: false,
+        },
+      ]);
+      updateTx(txId, { status: "success" });
+      appendLog(`[vesting] Linear schedule #${id} created`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+      appendLog(`[error] Create linear failed: ${formatApiError(error)}`);
+    } finally {
+      setIsVestingLoading(false);
+    }
+  };
+
+  const handleCreateMilestone = async (params: {
+    beneficiary: string; token: string; amount: number;
+    cliff: number; hashes: number[]; bps: number[];
+  }) => {
+    if (!contractId) return;
+    const txId = addTx(`Create milestone vesting for ${params.beneficiary.slice(0, 8)}…`);
+    setIsVestingLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "create_milestone_schedule",
+        args: {
+          beneficiary: params.beneficiary,
+          token: params.token,
+          total_amount: String(params.amount),
+          cliff_timestamp: String(params.cliff),
+          milestone_hashes: JSON.stringify(params.hashes),
+          milestone_bps: JSON.stringify(params.bps),
+        },
+      });
+      const id = vestingSchedules.length + 1;
+      setVestingSchedules((prev) => [
+        ...prev,
+        {
+          id,
+          beneficiary: params.beneficiary,
+          token: params.token,
+          totalAmount: params.amount,
+          releasedAmount: 0,
+          cliffTimestamp: params.cliff,
+          startTimestamp: params.cliff,
+          endTimestamp: params.cliff,
+          vestingType: "Milestone",
+          milestones: params.hashes.map((h, i) => ({
+            index: i,
+            descriptionHash: h,
+            pctBps: params.bps[i],
+            approved: false,
+          })),
+          revoked: false,
+        },
+      ]);
+      updateTx(txId, { status: "success" });
+      appendLog(`[vesting] Milestone schedule #${id} created`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+      appendLog(`[error] Create milestone failed: ${formatApiError(error)}`);
+    } finally {
+      setIsVestingLoading(false);
+    }
+  };
+
+  const handleVestingRelease = async (scheduleId: number) => {
+    if (!contractId) return;
+    const txId = addTx(`Release vesting schedule #${scheduleId}`);
+    setIsVestingLoading(true);
+    try {
+      const payload = await requestJson<{ output: string }>("/api/invoke", {
+        contractId,
+        functionName: "release",
+        args: { schedule_id: String(scheduleId) },
+      });
+      const released = parseInt(payload.output ?? "0");
+      setVestingSchedules((prev) =>
+        prev.map((s) =>
+          s.id === scheduleId ? { ...s, releasedAmount: s.releasedAmount + released } : s
+        )
+      );
+      updateTx(txId, { status: "success" });
+      appendLog(`[vesting] Released ${released} tokens from schedule #${scheduleId}`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+      appendLog(`[error] Release failed: ${formatApiError(error)}`);
+    } finally {
+      setIsVestingLoading(false);
+    }
+  };
+
+  const handleVestingRevoke = async (scheduleId: number) => {
+    if (!contractId) return;
+    const txId = addTx(`Revoke vesting schedule #${scheduleId}`);
+    setIsVestingLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "revoke",
+        args: { schedule_id: String(scheduleId) },
+      });
+      setVestingSchedules((prev) =>
+        prev.map((s) => (s.id === scheduleId ? { ...s, revoked: true } : s))
+      );
+      updateTx(txId, { status: "success" });
+      appendLog(`[vesting] Schedule #${scheduleId} revoked`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+      appendLog(`[error] Revoke failed: ${formatApiError(error)}`);
+    } finally {
+      setIsVestingLoading(false);
+    }
+  };
+
+  const handleApproveMilestone = async (scheduleId: number, milestoneIndex: number) => {
+    if (!contractId) return;
+    const txId = addTx(`Approve milestone ${milestoneIndex} on schedule #${scheduleId}`);
+    setIsVestingLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "approve_milestone",
+        args: { schedule_id: String(scheduleId), milestone_index: String(milestoneIndex) },
+      });
+      setVestingSchedules((prev) =>
+        prev.map((s) =>
+          s.id === scheduleId
+            ? {
+                ...s,
+                milestones: s.milestones.map((m) =>
+                  m.index === milestoneIndex ? { ...m, approved: true } : m
+                ),
+              }
+            : s
+        )
+      );
+      updateTx(txId, { status: "success" });
+      appendLog(`[vesting] Milestone ${milestoneIndex} approved on schedule #${scheduleId}`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+      appendLog(`[error] Approve milestone failed: ${formatApiError(error)}`);
+    } finally {
+      setIsVestingLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen px-4 py-4 text-slate-100 sm:px-6 lg:px-8">
       <div className="mx-auto flex min-h-[calc(100vh-2rem)] max-w-[1600px] flex-col overflow-hidden rounded-[28px] border border-white/8 bg-slate-950/60 shadow-[0_30px_120px_rgba(2,8,23,0.7)] backdrop-blur">
@@ -965,6 +1152,17 @@ export default function Home() {
               onCalculatePayout={handleCalculatePayout}
               markets={markets}
               isLoading={isPredictionLoading}
+            />
+            <VestingDashboard
+              contractId={contractId}
+              walletAddress={wallet.address ?? undefined}
+              schedules={vestingSchedules}
+              isLoading={isVestingLoading}
+              onCreateLinear={handleCreateLinear}
+              onCreateMilestone={handleCreateMilestone}
+              onRelease={handleVestingRelease}
+              onRevoke={handleVestingRevoke}
+              onApproveMilestone={handleApproveMilestone}
             />
             <TransactionStatus transactions={transactions} onClear={clearTx} />
             <Console logs={logs} />
