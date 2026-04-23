@@ -1,4 +1,4 @@
-export type LedgerState = Record<string, string>;
+export type LedgerState = Record<string, unknown>;
 
 export interface TransactionCallNode {
   id: string;
@@ -24,6 +24,7 @@ export interface TransactionCallGraph {
   nodes: TransactionCallNode[];
   edges: TransactionCallEdge[];
   rootId?: string;
+  txHash?: string;
 }
 
 const ROOT_KEYS = [
@@ -55,6 +56,8 @@ const LEDGER_KEYS = [
   "writes",
 ];
 
+const TX_HASH_KEYS = ["txHash", "transactionHash", "hash"];
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -70,6 +73,27 @@ function stringifyValue(value: unknown): string {
   } catch {
     return "[unserializable]";
   }
+}
+
+function cloneForSnapshot<T>(value: T): T {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => cloneForSnapshot(item)) as T;
+  }
+
+  const clone: Record<string, unknown> = {};
+  for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+    clone[key] = cloneForSnapshot(nestedValue);
+  }
+
+  return clone as T;
+}
+
+function cloneLedgerState(state: LedgerState): LedgerState {
+  return cloneForSnapshot(state);
 }
 
 function truncate(text: string, maxLength: number): string {
@@ -117,10 +141,28 @@ function normalizeLedgerState(rawLedger: unknown): LedgerState {
 
   const result: LedgerState = {};
   for (const [key, value] of Object.entries(rawLedger)) {
-    result[key] = stringifyValue(value);
+    result[key] = cloneForSnapshot(value);
   }
 
   return result;
+}
+
+function extractTxHash(payload: unknown): string | undefined {
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+
+  const direct = pickString(payload, TX_HASH_KEYS);
+  if (direct) {
+    return direct;
+  }
+
+  const txValue = payload.tx;
+  if (isRecord(txValue)) {
+    return pickString(txValue, ["id", "hash", ...TX_HASH_KEYS]);
+  }
+
+  return undefined;
 }
 
 function findChildrenArray(source: Record<string, unknown>): unknown[] {
@@ -206,7 +248,7 @@ export function parseTransactionInvocationPayload(payload: unknown): Transaction
     const result = pickUnknown(current, ["result", "returnValue", "output"]);
 
     const ledgerPatch = normalizeLedgerState(pickUnknown(current, LEDGER_KEYS));
-    const mergedLedger = { ...inheritedLedger, ...ledgerPatch };
+    const mergedLedger = cloneLedgerState({ ...inheritedLedger, ...ledgerPatch });
 
     const indexInDepth = depthCounters.get(depth) ?? 0;
     depthCounters.set(depth, indexInDepth + 1);
@@ -245,5 +287,6 @@ export function parseTransactionInvocationPayload(payload: unknown): Transaction
     nodes,
     edges,
     rootId: nodes[0]?.id,
+    txHash: extractTxHash(payload),
   };
 }

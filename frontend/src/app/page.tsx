@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   Activity,
   BookOpen,
@@ -18,6 +18,7 @@ import DeployPanel from "@/components/DeployPanel";
 import CallPanel from "@/components/CallPanel";
 import StorageViewer from "@/components/StorageViewer";
 import TransactionCallGraph from "@/components/TransactionCallGraph";
+import StorageTimeline from "@/components/StorageTimeline";
 import PredictionMarketPanel, { MarketData } from "@/components/PredictionMarketPanel";
 import WalletConnect from "@/components/WalletConnect";
 import TransactionStatus from "@/components/TransactionStatus";
@@ -30,6 +31,10 @@ import {
   type TransactionCallGraph as TransactionCallGraphState,
   type LedgerState,
 } from "@/utils/transactionGraph";
+import {
+  createInitialStorageTimelineState,
+  storageTimelineReducer,
+} from "@/state/storageTimeline";
 
 const DEFAULT_CODE = `#![no_std]
 use soroban_sdk::{contract, contractimpl, symbol_short, Env, Symbol};
@@ -285,6 +290,11 @@ export default function Home() {
   const [storageContextLabel, setStorageContextLabel] = useState<string>(
     "Latest contract snapshot",
   );
+  const [storageTimeline, dispatchStorageTimeline] = useReducer(
+    storageTimelineReducer,
+    undefined,
+    createInitialStorageTimelineState,
+  );
   const [transactionGraph, setTransactionGraph] =
     useState<TransactionCallGraphState>({
       nodes: [],
@@ -294,6 +304,14 @@ export default function Home() {
   const [lastArtifactName, setLastArtifactName] =
     useState<string>("contract.wasm");
   const [lastDeployMessage, setLastDeployMessage] = useState<string>();
+
+  const activeSnapshot = useMemo(
+    () =>
+      storageTimeline.currentIndex >= 0
+        ? storageTimeline.snapshots[storageTimeline.currentIndex]
+        : undefined,
+    [storageTimeline.currentIndex, storageTimeline.snapshots],
+  );
 
   // Prediction market state
   const [markets, setMarkets] = useState<MarketData[]>([]);
@@ -529,6 +547,17 @@ export default function Home() {
       setStorageContextLabel("Latest contract snapshot");
       setTransactionGraph({ nodes: [], edges: [] });
       setSelectedGraphNodeId(undefined);
+      dispatchStorageTimeline({
+        type: "reset_with_deployment",
+        contractId: payload.contractId,
+        state: {
+          contractName: payload.contractName,
+          network: payload.network,
+          wasmPath: payload.wasmPath,
+          deployedAt: payload.deployedAt,
+        },
+        capturedAt: payload.deployedAt,
+      });
 
       appendLog(`[deploy] ${payload.message}`);
       appendLog(`[deploy] Contract ID: ${payload.contractId}`);
@@ -646,6 +675,11 @@ export default function Home() {
         const uniqueContracts = new Set(
           parsedGraph.nodes.map((node) => node.contractId),
         ).size;
+        dispatchStorageTimeline({
+          type: "append_transaction_frames",
+          nodes: parsedGraph.nodes,
+          capturedAt: payload.invokedAt,
+        });
         setSelectedGraphNodeId(terminalNode.id);
         setStorage(terminalNode.ledgerState);
         setStorageContextLabel(
@@ -683,9 +717,30 @@ export default function Home() {
     setStorageContextLabel(
       `Snapshot at ${selectedNode.contractId}.${selectedNode.functionName}`,
     );
+    dispatchStorageTimeline({
+      type: "select_snapshot_for_node",
+      nodeId,
+    });
     appendLog(
       `[graph] Inspecting ${selectedNode.contractId}.${selectedNode.functionName}`,
     );
+  };
+
+  const handleTimelineScrub = (index: number) => {
+    const snapshot = storageTimeline.snapshots[index];
+    if (!snapshot) {
+      return;
+    }
+
+    dispatchStorageTimeline({
+      type: "select_snapshot_index",
+      index,
+    });
+    setStorage(snapshot.state);
+    setStorageContextLabel(snapshot.contextLabel);
+    if (snapshot.nodeId) {
+      setSelectedGraphNodeId(snapshot.nodeId);
+    }
   };
 
   // ── Prediction Market handlers ─────────────────────────────────────────────
@@ -1485,6 +1540,13 @@ export default function Home() {
               graph={transactionGraph}
               selectedNodeId={selectedGraphNodeId}
               onNodeSelect={handleGraphNodeSelect}
+            />
+            <StorageTimeline
+              totalFrames={storageTimeline.snapshots.length}
+              currentFrame={Math.max(storageTimeline.currentIndex, 0)}
+              contextLabel={activeSnapshot?.contextLabel ?? storageContextLabel}
+              capturedAt={activeSnapshot?.capturedAt}
+              onScrub={handleTimelineScrub}
             />
             <StorageViewer
               storage={storage}
