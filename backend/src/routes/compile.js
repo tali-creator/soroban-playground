@@ -1,96 +1,95 @@
-import express from "express";
-import { exec } from "child_process";
-import fs from "fs/promises";
-import path from "path";
+import express from 'express';
+import { asyncHandler, createHttpError } from '../middleware/errorHandler.js';
+import { sanitizeDependenciesInput } from './compile_utils.js';
+import {
+  compileQueued,
+  compileBatch,
+  getCompileSnapshot,
+} from '../services/compileService.js';
 
 const router = express.Router();
 
-router.post("/", async (req, res) => {
-  const { code } = req.body;
-  if (!code) {
-    return res.status(400).json({ error: "No code provided" });
-  }
+router.post(
+  '/',
+  asyncHandler(async (req, res, next) => {
+    const { code, dependencies } = req.body || {};
+    if (!code) {
+      return next(createHttpError(400, 'No code provided'));
+    }
 
-  // Define a temporary working directory for this compilation
-  const tempDir = path.resolve(process.cwd(), ".tmp_compile_" + Date.now());
+    const depValidation = sanitizeDependenciesInput(dependencies);
+    if (!depValidation.ok) {
+      return next(
+        createHttpError(400, depValidation.error, depValidation.details)
+      );
+    }
 
-  try {
-    // Scaffold a temp Rust project
-    await fs.mkdir(tempDir, { recursive: true });
-    await fs.mkdir(path.join(tempDir, "src"), { recursive: true });
+    try {
+      const result = await compileQueued({
+        requestId: `compile-${Date.now()}`,
+        code,
+        dependencies: depValidation.deps,
+      });
+      return res.json({
+        success: true,
+        status: 'success',
+        message: result.cached
+          ? 'Contract compiled from cache'
+          : 'Contract compiled successfully',
+        cached: result.cached,
+        hash: result.hash,
+        durationMs: result.durationMs,
+        logs: result.logs,
+        artifact: {
+          name: result.artifact.name,
+          sizeBytes: result.artifact.sizeBytes,
+          path: result.artifact.path,
+        },
+      });
+    } catch (error) {
+      return next(
+        createHttpError(500, 'Compilation failed', { details: error.message })
+      );
+    }
+  })
+);
 
-    // Write Cargo.toml
-    const cargoToml = `
-[package]
-name = "soroban_contract"
-version = "0.0.0"
-edition = "2021"
-
-[lib]
-crate-type = ["cdylib"]
-
-[dependencies]
-soroban-sdk = "20.0.0"
-
-[profile.release]
-opt-level = "z"
-overflow-checks = true
-debug = 0
-strip = "symbols"
-debug-assertions = false
-panic = "abort"
-codegen-units = 1
-lto = true
-`;
-    await fs.writeFile(path.join(tempDir, "Cargo.toml"), cargoToml);
-
-    // Write the contract code
-    await fs.writeFile(path.join(tempDir, "src", "lib.rs"), code);
-
-    // Execute Soroban CLI (or cargo block)
-    // Note: In a real server you might queue these or containerize. Here we spawn.
-    const command = `cargo build --target wasm32-unknown-unknown --release`;
-
-    exec(command, { cwd: tempDir, timeout: 30000 }, async (err, stdout, stderr) => {
-      // Setup cleanup task
-      const cleanUp = async () => {
-        try {
-          await fs.rm(tempDir, { recursive: true, force: true });
-        } catch (e) {
-          console.error("Failed to clean up:", e);
-        }
-      };
-
-      if (err) {
-        await cleanUp();
-        return res.status(500).json({ 
-          error: "Compilation failed", 
-          details: stderr || err.message 
-        });
-      }
-
-      // Check if wasm exists
-      const wasmPath = path.join(tempDir, "target", "wasm32-unknown-unknown", "release", "soroban_contract.wasm");
-      try {
-        await fs.access(wasmPath);
-        // It's built successfully
-        await cleanUp();
-        return res.json({ 
-          success: true, 
-          message: "Contract compiled successfully",
-          logs: stdout || "Build completed.",
-          // In a full implementation, you'd store the WASM or return its base64
-        });
-      } catch (e) {
-        await cleanUp();
-        return res.status(500).json({ error: "WASM file not generated", details: stderr });
-      }
+router.post(
+  '/batch',
+  asyncHandler(async (req, res, next) => {
+    const { contracts } = req.body || {};
+    if (!Array.isArray(contracts) || contracts.length === 0) {
+      return next(createHttpError(400, 'contracts must be a non-empty array'));
+    }
+    const jobs = contracts.slice(0, 4).map((contract, index) => ({
+      requestId: `batch-compile-${Date.now()}-${index}`,
+      code: contract.code,
+      dependencies: contract.dependencies || {},
+    }));
+    const results = await compileBatch(jobs);
+    return res.json({
+      success: true,
+      status: 'success',
+      queueLength: 0,
+      activeWorkers: Math.min(4, contracts.length),
+      results: results.map((result, index) => ({
+        contractIndex: index,
+        ...result,
+      })),
     });
+  })
+);
 
-  } catch (err) {
-    try { await fs.rm(tempDir, { recursive: true, force: true }); } catch (cleanupErr) {}
-    res.status(500).json({ error: "Internal server error", details: err.message });
-  }
-});
+router.get(
+  '/stats',
+  asyncHandler(async (_req, res) => {
+    const stats = await getCompileSnapshot();
+    return res.json({
+      success: true,
+      status: 'success',
+      stats,
+    });
+  })
+);
 
 export default router;
