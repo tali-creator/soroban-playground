@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useMemo, useReducer, useState } from "react";
 import Editor from "@/components/Editor";
 import Console from "@/components/Console";
 import DeployPanel from "@/components/DeployPanel";
@@ -12,6 +12,10 @@ import {
   type TransactionCallGraph as TransactionCallGraphState,
   type LedgerState,
 } from "@/utils/transactionGraph";
+import {
+  createInitialStorageTimelineState,
+  storageTimelineReducer,
+} from "@/state/storageTimeline";
 import { Sparkles, Code2, BookOpen } from "lucide-react";
 
 const DEFAULT_CODE = `#![no_std]
@@ -32,6 +36,29 @@ function shortId(contractId: string): string {
   return contractId.length > 14 ? `${contractId.slice(0, 8)}...${contractId.slice(-4)}` : contractId;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asLedgerNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  return 0;
+}
+
+function buildHexPayload(seed: number): string {
+  const base = seed.toString(16).padStart(16, "0");
+  const repeated = `${base}a1b2c3d4e5f6`.repeat(5);
+  return `0x${repeated}`;
+}
+
 function createMockInvocationPayload(
   contractId: string,
   funcName: string,
@@ -41,11 +68,22 @@ function createMockInvocationPayload(
   const timestamp = Date.now();
   const serializedArgs = JSON.stringify(args);
   const userName = args.name ?? "anonymous";
+  const transactionCount = asLedgerNumber(baseStorage.tx_sequence) + 1;
+  const existingCheckpoints = isRecord(baseStorage.checkpoints) ? baseStorage.checkpoints : {};
+  const checkpointKey = `tx:${timestamp}`;
+
   const rootStorage = {
     ...baseStorage,
     last_function: funcName,
     last_args: serializedArgs,
     last_invoked_at: new Date(timestamp).toISOString(),
+    tx_sequence: transactionCount,
+    ledger_meta: {
+      actor: userName,
+      function: funcName,
+      arg_keys: Object.keys(args),
+    },
+    last_event_hex: buildHexPayload(timestamp),
   };
 
   const routerContract = `ROUTER_${shortId(contractId)}`;
@@ -72,8 +110,13 @@ function createMockInvocationPayload(
           },
           result: "forwarded",
           ledgerState: {
-            route_count: String(Number(baseStorage.route_count ?? "0") + 1),
+            route_count: asLedgerNumber(baseStorage.route_count) + 1,
             last_route_target: tokenContract,
+            route_stats: {
+              total_routes: asLedgerNumber(baseStorage.route_count) + 1,
+              last_success: true,
+              depth_seen: [0, 1],
+            },
           },
           children: [
             {
@@ -87,7 +130,16 @@ function createMockInvocationPayload(
               output: "checkpoint_written",
               storage: {
                 last_greeting: userName,
-                checkpoint_count: String(Number(baseStorage.checkpoint_count ?? "0") + 1),
+                checkpoint_count: asLedgerNumber(baseStorage.checkpoint_count) + 1,
+                checkpoints: {
+                  ...existingCheckpoints,
+                  [checkpointKey]: {
+                    greeting: userName,
+                    args,
+                    recorded_at: new Date(timestamp).toISOString(),
+                    digest: buildHexPayload(timestamp + 7),
+                  },
+                },
               },
               children: [],
             },
@@ -103,8 +155,12 @@ function createMockInvocationPayload(
           },
           returnValue: "audit_ok",
           state: {
-            audit_trail_size: String(Number(baseStorage.audit_trail_size ?? "0") + 1),
+            audit_trail_size: asLedgerNumber(baseStorage.audit_trail_size) + 1,
             last_audited_fn: funcName,
+            audit_meta: {
+              tx_tag: `AUDIT-${timestamp}`,
+              observed_contracts: [contractId, routerContract, tokenContract],
+            },
           },
           subInvocations: [],
         },
@@ -125,13 +181,23 @@ export default function Home() {
 
   // Contract Data
   const [contractId, setContractId] = useState<string | undefined>(undefined);
-  const [storage, setStorage] = useState<LedgerState>({});
-  const [storageContextLabel, setStorageContextLabel] = useState<string>("Latest contract snapshot");
+  const [storageTimeline, dispatchStorageTimeline] = useReducer(
+    storageTimelineReducer,
+    undefined,
+    createInitialStorageTimelineState,
+  );
   const [transactionGraph, setTransactionGraph] = useState<TransactionCallGraphState>({
     nodes: [],
     edges: [],
   });
   const [selectedGraphNodeId, setSelectedGraphNodeId] = useState<string | undefined>(undefined);
+
+  const activeSnapshot =
+    storageTimeline.currentIndex >= 0 ? storageTimeline.snapshots[storageTimeline.currentIndex] : undefined;
+  const previousSnapshot =
+    storageTimeline.currentIndex > 0 ? storageTimeline.snapshots[storageTimeline.currentIndex - 1] : undefined;
+  const activeStorage = useMemo(() => activeSnapshot?.state ?? {}, [activeSnapshot]);
+  const storageContextLabel = activeSnapshot?.contextLabel ?? "Latest contract snapshot";
 
   const appendLog = (msg: string) => setLogs((prev) => [...prev, msg]);
 
@@ -165,13 +231,17 @@ export default function Home() {
 
       const deployedState = {
         admin: "G" + Math.random().toString(36).substring(2, 34).toUpperCase(),
-        checkpoint_count: "0",
-        route_count: "0",
-        audit_trail_size: "0",
+        checkpoint_count: 0,
+        route_count: 0,
+        audit_trail_size: 0,
+        tx_sequence: 0,
       };
 
-      setStorage(deployedState);
-      setStorageContextLabel("Latest contract snapshot");
+      dispatchStorageTimeline({
+        type: "reset_with_deployment",
+        contractId: newContractId,
+        state: deployedState,
+      });
     }, 2500);
   };
 
@@ -183,9 +253,20 @@ export default function Home() {
       return;
     }
 
-    setStorage(selectedNode.ledgerState);
-    setStorageContextLabel(`Snapshot at ${selectedNode.contractId}.${selectedNode.functionName}`);
+    dispatchStorageTimeline({
+      type: "select_snapshot_for_node",
+      nodeId,
+    });
     appendLog(`Inspecting call node: ${selectedNode.contractId} -> ${selectedNode.functionName}`);
+  };
+
+  const handleTimelineScrub = (index: number) => {
+    const snapshot = storageTimeline.snapshots[index];
+    setSelectedGraphNodeId(snapshot?.nodeId);
+    dispatchStorageTimeline({
+      type: "select_snapshot_index",
+      index,
+    });
   };
 
   const handleInvoke = async (funcName: string, args: Record<string, string>) => {
@@ -200,7 +281,7 @@ export default function Home() {
     setTimeout(() => {
       setIsInvoking(false);
 
-      const invocationPayload = createMockInvocationPayload(contractId, funcName, args, storage);
+      const invocationPayload = createMockInvocationPayload(contractId, funcName, args, activeStorage);
       const parsedGraph = parseTransactionInvocationPayload(invocationPayload);
       setTransactionGraph(parsedGraph);
 
@@ -209,10 +290,14 @@ export default function Home() {
         return;
       }
 
+      dispatchStorageTimeline({
+        type: "append_transaction_frames",
+        nodes: parsedGraph.nodes,
+        txHash: parsedGraph.txHash,
+      });
+
       const terminalNode = parsedGraph.nodes[parsedGraph.nodes.length - 1];
       setSelectedGraphNodeId(terminalNode.id);
-      setStorage(terminalNode.ledgerState);
-      setStorageContextLabel(`Snapshot at ${terminalNode.contractId}.${terminalNode.functionName}`);
 
       const uniqueContracts = new Set(parsedGraph.nodes.map((node) => node.contractId)).size;
       appendLog(`✓ Captured invocation tree: ${parsedGraph.nodes.length} calls across ${uniqueContracts} contracts.`);
@@ -279,7 +364,15 @@ export default function Home() {
             selectedNodeId={selectedGraphNodeId}
             onNodeSelect={handleGraphNodeSelect}
           />
-          <StorageViewer storage={storage} contextLabel={storageContextLabel} />
+          <StorageViewer
+            storage={activeStorage}
+            previousStorage={previousSnapshot?.state}
+            contextLabel={storageContextLabel}
+            totalFrames={storageTimeline.snapshots.length}
+            currentFrame={Math.max(storageTimeline.currentIndex, 0)}
+            capturedAt={activeSnapshot?.capturedAt}
+            onScrubTimeline={handleTimelineScrub}
+          />
 
           <div className="mt-auto pt-4">
             <Console logs={logs} />
