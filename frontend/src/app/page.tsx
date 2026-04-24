@@ -28,6 +28,11 @@ import LendingDashboard from "@/components/LendingDashboard";
 import FlashLoanPanel from "@/components/FlashLoanPanel";
 import CloudStoragePanel from "@/components/CloudStoragePanel";
 import MusicRoyaltyPanel from "@/components/MusicRoyaltyPanel";
+import MultisigWalletDashboard, {
+  type SignerData,
+  type MultisigTx,
+  type SignerRole,
+} from "@/components/MultisigWalletDashboard";
 import { useFreighterWallet } from "@/hooks/useFreighterWallet";
 import { useTransactionTracker } from "@/hooks/useTransactionTracker";
 import {
@@ -107,6 +112,8 @@ type InvokeProgressEvent = {
   status?: string;
   detail?: string;
   timestamp?: string;
+  queueLength?: number;
+  activeWorkers?: number;
 };
 
 type DeployProgressEvent = InvokeProgressEvent & {
@@ -330,8 +337,13 @@ export default function Home() {
   const [isIdentityLoading, setIsIdentityLoading] = useState(false);
 
   // Wallet + transaction tracking
-  const wallet = useFreighterWallet();
-  const { transactions, addTx, updateTx, clearTx } = useTransactionTracker();
+  const wallet = useFreighterWallet();  const { transactions, addTx, updateTx, clearTx } = useTransactionTracker();
+
+  // Multisig wallet state
+  const [multisigSigners, setMultisigSigners] = useState<SignerData[]>([]);
+  const [multisigTxs, setMultisigTxs] = useState<MultisigTx[]>([]);
+  const [multisigThreshold, setMultisigThreshold] = useState(2);
+  const [isMultisigLoading, setIsMultisigLoading] = useState(false);
 
   const appendLog = (msg: string) => {
     setLogs((prev) => [...prev, msg]);
@@ -1258,6 +1270,192 @@ export default function Home() {
     }
   };
 
+  // ── Multisig wallet handlers ───────────────────────────────────────────────
+
+  const handleMultisigAddSigner = async (address: string, role: SignerRole) => {
+    if (!contractId) return;
+    const txId = addTx(`Add signer ${address.slice(0, 8)}… as ${role}`);
+    setIsMultisigLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "add_signer",
+        args: { caller: walletAddress ?? address, new_signer: address, role },
+      });
+      setMultisigSigners((prev) => [...prev, { address, role }]);
+      updateTx(txId, { status: "success" });
+      appendLog(`[multisig] Signer added: ${address} (${role})`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+      appendLog(`[error] Add signer failed: ${formatApiError(error)}`);
+    } finally {
+      setIsMultisigLoading(false);
+    }
+  };
+
+  const handleMultisigRemoveSigner = async (address: string) => {
+    if (!contractId) return;
+    const txId = addTx(`Remove signer ${address.slice(0, 8)}…`);
+    setIsMultisigLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "remove_signer",
+        args: { caller: walletAddress ?? address, target: address },
+      });
+      setMultisigSigners((prev) => prev.filter((s) => s.address !== address));
+      updateTx(txId, { status: "success" });
+      appendLog(`[multisig] Signer removed: ${address}`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+      appendLog(`[error] Remove signer failed: ${formatApiError(error)}`);
+    } finally {
+      setIsMultisigLoading(false);
+    }
+  };
+
+  const handleMultisigChangeThreshold = async (t: number) => {
+    if (!contractId) return;
+    const txId = addTx(`Change threshold to ${t}`);
+    setIsMultisigLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "change_threshold",
+        args: { caller: walletAddress ?? "", new_threshold: String(t) },
+      });
+      setMultisigThreshold(t);
+      updateTx(txId, { status: "success" });
+      appendLog(`[multisig] Threshold changed to ${t}`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+      appendLog(`[error] Change threshold failed: ${formatApiError(error)}`);
+    } finally {
+      setIsMultisigLoading(false);
+    }
+  };
+
+  const handleMultisigPropose = async (description: string, amount: number, recipient?: string) => {
+    if (!contractId) return;
+    const txId = addTx(`Propose: "${description.slice(0, 30)}"`);
+    setIsMultisigLoading(true);
+    try {
+      const payload = await requestJson<{ output: string }>("/api/invoke", {
+        contractId,
+        functionName: "propose",
+        args: {
+          proposer: walletAddress ?? "",
+          description,
+          amount: String(amount),
+          ...(recipient ? { recipient } : {}),
+        },
+      });
+      const newId = parseInt(payload.output ?? String(multisigTxs.length));
+      const now = Math.floor(Date.now() / 1000);
+      setMultisigTxs((prev) => [
+        ...prev,
+        {
+          id: newId,
+          proposer: walletAddress ?? "unknown",
+          description,
+          amount,
+          recipient,
+          status: "Pending",
+          approvals: 0,
+          threshold: multisigThreshold,
+          createdAt: now,
+          executeAfter: now + 86400,
+        },
+      ]);
+      updateTx(txId, { status: "success" });
+      appendLog(`[multisig] Transaction #${newId} proposed`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+      appendLog(`[error] Propose failed: ${formatApiError(error)}`);
+    } finally {
+      setIsMultisigLoading(false);
+    }
+  };
+
+  const handleMultisigApprove = async (msigTxId: number) => {
+    if (!contractId) return;
+    const txId = addTx(`Approve tx #${msigTxId}`);
+    setIsMultisigLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "approve",
+        args: { signer: walletAddress ?? "", tx_id: String(msigTxId) },
+      });
+      setMultisigTxs((prev) =>
+        prev.map((t) => {
+          if (t.id !== msigTxId) return t;
+          const newApprovals = t.approvals + 1;
+          return {
+            ...t,
+            approvals: newApprovals,
+            status: newApprovals >= t.threshold ? "Queued" : "Pending",
+          };
+        })
+      );
+      updateTx(txId, { status: "success" });
+      appendLog(`[multisig] Tx #${msigTxId} approved`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+      appendLog(`[error] Approve failed: ${formatApiError(error)}`);
+    } finally {
+      setIsMultisigLoading(false);
+    }
+  };
+
+  const handleMultisigExecute = async (msigTxId: number) => {
+    if (!contractId) return;
+    const txId = addTx(`Execute tx #${msigTxId}`);
+    setIsMultisigLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "execute",
+        args: { caller: walletAddress ?? "", tx_id: String(msigTxId) },
+      });
+      setMultisigTxs((prev) =>
+        prev.map((t) => (t.id === msigTxId ? { ...t, status: "Executed" } : t))
+      );
+      updateTx(txId, { status: "success" });
+      appendLog(`[multisig] Tx #${msigTxId} executed`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+      appendLog(`[error] Execute failed: ${formatApiError(error)}`);
+    } finally {
+      setIsMultisigLoading(false);
+    }
+  };
+
+  const handleMultisigCancel = async (msigTxId: number) => {
+    if (!contractId) return;
+    const txId = addTx(`Cancel tx #${msigTxId}`);
+    setIsMultisigLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "cancel",
+        args: { caller: walletAddress ?? "", tx_id: String(msigTxId) },
+      });
+      setMultisigTxs((prev) =>
+        prev.map((t) => (t.id === msigTxId ? { ...t, status: "Cancelled" } : t))
+      );
+      updateTx(txId, { status: "success" });
+      appendLog(`[multisig] Tx #${msigTxId} cancelled`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+      appendLog(`[error] Cancel failed: ${formatApiError(error)}`);
+    } finally {
+      setIsMultisigLoading(false);
+    }
+  };
+
+  const walletAddress = wallet.address ?? undefined;
+
   return (
     <div className="min-h-screen px-4 py-4 text-slate-100 sm:px-6 lg:px-8">
       <div className="mx-auto flex min-h-[calc(100vh-2rem)] max-w-[1600px] flex-col overflow-hidden rounded-[28px] border border-white/8 bg-slate-950/60 shadow-[0_30px_120px_rgba(2,8,23,0.7)] backdrop-blur">
@@ -1555,6 +1753,10 @@ export default function Home() {
             <StorageViewer
               storage={storage}
               contextLabel={storageContextLabel}
+              totalFrames={storageTimeline.snapshots.length}
+              currentFrame={Math.max(storageTimeline.currentIndex, 0)}
+              capturedAt={activeSnapshot?.capturedAt}
+              onScrubTimeline={handleTimelineScrub}
             />
             <WalletConnect wallet={wallet} />
             <PredictionMarketPanel
@@ -1595,6 +1797,21 @@ export default function Home() {
             <FlashLoanPanel />
             <CloudStoragePanel />
             <MusicRoyaltyPanel />
+            <MultisigWalletDashboard
+              contractId={contractId}
+              walletAddress={walletAddress}
+              signers={multisigSigners}
+              transactions={multisigTxs}
+              threshold={multisigThreshold}
+              isLoading={isMultisigLoading}
+              onAddSigner={handleMultisigAddSigner}
+              onRemoveSigner={handleMultisigRemoveSigner}
+              onChangeThreshold={handleMultisigChangeThreshold}
+              onPropose={handleMultisigPropose}
+              onApprove={handleMultisigApprove}
+              onExecute={handleMultisigExecute}
+              onCancel={handleMultisigCancel}
+            />
             <TransactionStatus transactions={transactions} onClear={clearTx} />
             <Console logs={logs} />
           </aside>
