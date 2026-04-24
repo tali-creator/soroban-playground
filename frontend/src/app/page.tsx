@@ -24,6 +24,7 @@ import WalletConnect from "@/components/WalletConnect";
 import TransactionStatus from "@/components/TransactionStatus";
 import VestingDashboard, { VestingScheduleData } from "@/components/VestingDashboard";
 import IdentityPortal, { IdentityData } from "@/components/IdentityPortal";
+import CarbonCreditDashboard, { IssuerData, CarbonAssetData } from "@/components/CarbonCreditDashboard";
 import { useFreighterWallet } from "@/hooks/useFreighterWallet";
 import { useTransactionTracker } from "@/hooks/useTransactionTracker";
 import {
@@ -324,6 +325,11 @@ export default function Home() {
   // DID identity state
   const [identities, setIdentities] = useState<IdentityData[]>([]);
   const [isIdentityLoading, setIsIdentityLoading] = useState(false);
+
+  // Carbon Credit state
+  const [carbonIssuer, setCarbonIssuer] = useState<IssuerData>();
+  const [carbonAssets, setCarbonAssets] = useState<CarbonAssetData>({ balance: 0, totalRetired: 0, totalOwned: 0 });
+  const [isCarbonLoading, setIsCarbonLoading] = useState(false);
 
   // Wallet + transaction tracking
   const wallet = useFreighterWallet();
@@ -1254,6 +1260,127 @@ export default function Home() {
     }
   };
 
+  // ── Carbon Credit handlers ──────────────────────────────────────────────────
+
+  const handleRegisterIssuer = async (name: string) => {
+    if (!contractId || !wallet.address) return;
+    const txId = addTx(`Register Carbon Issuer: ${name}`);
+    setIsCarbonLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "register_issuer",
+        args: { issuer: wallet.address, name },
+      });
+      setCarbonIssuer({
+        address: wallet.address,
+        name,
+        verified: false,
+        totalMinted: 0,
+      });
+      updateTx(txId, { status: "success" });
+      appendLog(`[carbon] Issuer registered: ${name}`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+      appendLog(`[error] Register issuer failed: ${formatApiError(error)}`);
+    } finally {
+      setIsCarbonLoading(false);
+    }
+  };
+
+  const handleVerifyIssuer = async (issuerAddress: string) => {
+    if (!contractId) return;
+    const txId = addTx(`Verify Carbon Issuer: ${issuerAddress.slice(0, 8)}…`);
+    setIsCarbonLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "verify_issuer",
+        args: { issuer: issuerAddress },
+      });
+      if (carbonIssuer?.address === issuerAddress) {
+        setCarbonIssuer(prev => prev ? { ...prev, verified: true } : prev);
+      }
+      updateTx(txId, { status: "success" });
+      appendLog(`[carbon] Issuer verified: ${issuerAddress}`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+    } finally {
+      setIsCarbonLoading(false);
+    }
+  };
+
+  const handleMintCredits = async (to: string, amount: number) => {
+    if (!contractId || !carbonIssuer) return;
+    const txId = addTx(`Mint ${amount} Carbon Credits to ${to.slice(0, 8)}…`);
+    setIsCarbonLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "mint",
+        args: { issuer: carbonIssuer.address, to, amount: String(amount) },
+      });
+      setCarbonIssuer(prev => prev ? { ...prev, totalMinted: prev.totalMinted + amount } : prev);
+      if (to === wallet.address) {
+        setCarbonAssets(prev => ({ 
+          ...prev, 
+          balance: prev.balance + amount,
+          totalOwned: prev.totalOwned + amount 
+        }));
+      }
+      updateTx(txId, { status: "success" });
+      appendLog(`[carbon] ${amount} credits minted to ${to}`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+    } finally {
+      setIsCarbonLoading(false);
+    }
+  };
+
+  const handleRetireCredits = async (amount: number) => {
+    if (!contractId || !wallet.address) return;
+    const txId = addTx(`Retire ${amount} Carbon Credits`);
+    setIsCarbonLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "retire",
+        args: { user: wallet.address, amount: String(amount) },
+      });
+      setCarbonAssets(prev => ({
+        ...prev,
+        balance: prev.balance - amount,
+        totalRetired: prev.totalRetired + amount,
+      }));
+      updateTx(txId, { status: "success" });
+      appendLog(`[carbon] ${amount} credits retired by user`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+    } finally {
+      setIsCarbonLoading(false);
+    }
+  };
+
+  const handleTransferCredits = async (to: string, amount: number) => {
+    if (!contractId || !wallet.address) return;
+    const txId = addTx(`Transfer ${amount} Carbon Credits to ${to.slice(0, 8)}…`);
+    setIsCarbonLoading(true);
+    try {
+      await requestJson("/api/invoke", {
+        contractId,
+        functionName: "transfer",
+        args: { from: wallet.address, to, amount: String(amount) },
+      });
+      setCarbonAssets(prev => ({ ...prev, balance: prev.balance - amount }));
+      updateTx(txId, { status: "success" });
+      appendLog(`[carbon] ${amount} credits transferred to ${to}`);
+    } catch (error) {
+      updateTx(txId, { status: "error", error: formatApiError(error) });
+    } finally {
+      setIsCarbonLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen px-4 py-4 text-slate-100 sm:px-6 lg:px-8">
       <div className="mx-auto flex min-h-[calc(100vh-2rem)] max-w-[1600px] flex-col overflow-hidden rounded-[28px] border border-white/8 bg-slate-950/60 shadow-[0_30px_120px_rgba(2,8,23,0.7)] backdrop-blur">
@@ -1586,6 +1713,16 @@ export default function Home() {
               onIssueCredential={handleIssueCredential}
               onRevokeCredential={handleRevokeCredential}
               onAdjustReputation={handleAdjustReputation}
+            />
+            <CarbonCreditDashboard
+              isLoading={isCarbonLoading}
+              issuer={carbonIssuer}
+              assets={carbonAssets}
+              onRegisterIssuer={handleRegisterIssuer}
+              onVerifyIssuer={handleVerifyIssuer}
+              onMint={handleMintCredits}
+              onTransfer={handleTransferCredits}
+              onRetire={handleRetireCredits}
             />
             <TransactionStatus transactions={transactions} onClear={clearTx} />
             <Console logs={logs} />
